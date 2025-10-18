@@ -593,3 +593,59 @@ function search_recycled(){
     return 0
 
 }
+
+function empty_recyclebin(){ #ask teacher if this wouldnt be the same as the delete function when in single mode
+    local idArg=""
+    local force=false
+
+    for a in "$@"; do
+        case "$a" in
+            --force) force=true ;;
+            *) 
+                if [[ -z "$idArg" ]]; then
+                    idArg="$a"
+                else
+                    echo "Usage: empty_recyclebin [--force] [<UUID-or-short-id-or-filename>]"
+                    return 1
+                fi
+                ;;
+        esac
+    done
+
+    #quick check if recycle bin has been initailized just for good measure
+    if [ -z "$RECYCLE_BIN" ] || [ -z "$METADATA_LOG" ] || [ -z "$FILES_DIR" ] || [ -z "$LOG" ]; then
+        echo "Recycle bin variables are not initialized. Call initialize_recyclebin first." >&2
+        return 1
+    fi
+
+    if [ ! -f "$METADATA_LOG" ]; then
+        echo "No metadata file found at: $METADATA_LOG"
+        return 0
+    fi
+
+    #determine deletion mode (single or all)
+    local mode="all"
+    if [[ -n "$idArg" ]]; then 
+        mode="single"
+    fi
+
+    #confirming force since it is dangerous
+    if ["$force" != "true"]; then
+        if ["$mode" = "all" ]; then
+            read -rp "Permanently delete ALL items in the recycle bin? This cannot be undone. Type 'YES' to confirm: " confirm
+            if [ "$confirm" != "YES" ]; then
+                echo "Operation cancelled."
+                return 0
+            fi
+        else
+           read -rp "Permanently delete item matching ID '$idArg'? This cannot be undone. Type YES to confirm: " confirm
+           if [ "$confirm" != "YES" ]; then
+                echo "Operation cancelled."
+                return 0
+           fi
+        fi
+    fi
+            
+
+
+}
