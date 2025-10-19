@@ -820,6 +820,121 @@ function empty_recyclebin(){ #ask teacher if this wouldnt be the same as the del
         return 0
     
 }
+function show_statistics(){
+        local recycle_bin="$RECYCLE_BIN"
+        local metadata_file="$METADATA_LOG"
+        local config_file="$CONFIG"
+
+        if [ -z "$recycle_bin" ] || [ -z "$metadata_file" ] || [ -z "$config_file" ]; then
+            echo "Recycle bin variables are not initialized. Call initialize_recyclebin first." >&2
+            return 1
+        fi
+
+        if [ ! -f "$metadata_file" ]; then
+            echo "No metadata file found at: $metadata_file"
+            echo "Total items: 0"
+            echo "Total size: 0B"
+            return 1
+        fi
+
+        local max_mb = 1024
+        if [ -f "$config_file"];
+           val=$(awk -F= '/^MAX_SIZE_MB=/ {print $2; exit}' "$config_file" 2>/dev/null)
+            if [ -n "$val" ] && [[ "$val" =~ ^[0-9]+$ ]]; then
+                max_mb=$val
+            fi
+        fi
+        local quota_bytes=$(( max_mb * 1024 * 1024 ))
+
+        #variables for the counters
+        local total=0
+        local total_bytes=0
+        local files=0
+        local dirs=0
+        local -a keys=()
+        local oldest_ts=0
+        local newest_ts=0
+
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            case "$line" in 
+                deletion_timestamp*|deletion_timestap,* ) continue;;
+            esac
+
+            IFS= | read -r ts uuid base orig rec size ftype _rest <<< "$line"
+            [ -z "$uuid" ] && continue
+
+            total=$((total + 1))
+            size=${size:-0}
+
+            #making sure its numeric
+            if ! [[ "$size" =~ ^[0-9]+$ ]]; then
+                size=0
+            fi
+            total_bytes=$(( total_bytes + size ))
+            
+            if [ "$ftype" = "directory" ]; then
+                dirs=$((dirs + 1))
+            else    
+                files=$((files + 1))
+            fi
+
+            # if ts matches expected DDMMYYYYHHMMSS, build sortable key YYYYMMDDHHMMSS and keep ISO form
+            #i do this because its just better to start from the year to be able to tell which one is older
+
+            if [[ $ts =~ ^[0-9]{14}$ ]]; then
+                key="${ts:4:4}${ts:2:2}${ts:0:2}${ts:8:2}${ts:10:2}${ts:12:2}"
+                iso="${ts:4:4}-${ts:2:2}-${ts:0:2} ${ts:8:2}:${ts:10:2}:${ts:12:2}"
+                keys+=( "${key}|${iso}")
+            fi
+
+        done < "$metadata_file"
+
+        if [ ${#keys[@]} -gt 0 ]; then  
+             IFS=$'\n' sorted=($(printf "%s\n" "${keys[@]}" | sort))
+            unset IFS
+            oldest_ts="${sorted[0]#*|}"
+            newest_ts="${sorted[-1]#*|}"
+        fi
+        human_readable() {
+        local bytes=$1
+        if [ "$bytes" -lt 1024 ]; then
+            echo "${bytes}B"
+        elif [ "$bytes" -lt $((1024*1024)) ]; then
+            printf "%dKB" $((bytes / 1024))
+        elif [ "$bytes" -lt $((1024*1024*1024)) ]; then
+            printf "%dMB" $((bytes / 1024 / 1024))
+        else
+            printf "%dGB" $((bytes / 1024 / 1024 / 1024))
+        fi
+        }
+        if [ "$total" -eq 0 ]; then
+        echo "Total items: 0"
+        echo "Total size: 0B (0%)"
+        echo "Files: 0  Directories: 0"
+        echo "Oldest item: N/A"
+        echo "Newest item: N/A"
+        echo "Average size: 0B"
+        return 0
+        fi
+
+    local percent=0
+    if [ "$quota_bytes" -gt 0 ]; then
+        percent=$(( (total_bytes * 100) / quota_bytes ))
+    fi
+    local avg=$(( total_bytes / total ))
+
+    echo "Total items: $total"
+    printf "Total size: %s (%d bytes) — quota: %dMB (%d%%)\n" "$(human_readable "$total_bytes")" "$total_bytes" "$max_mb" "$percent"
+    echo "Files: $files  Directories: $dirs"
+    [ -n "$oldest_ts" ] && echo "Oldest item: $oldest_ts" || echo "Oldest item: N/A"
+    [ -n "$newest_ts" ] && echo "Newest item: $newest_ts" || echo "Newest item: N/A"
+    printf "Average item size: %s (%d bytes)\n" "$(human_readable "$avg")" "$avg"
+
+    return 0
+        
+   
+    }
 
 
 function display_help(){ #using teacher suggestion(cat << EOF)
