@@ -645,7 +645,289 @@ function empty_recyclebin(){ #ask teacher if this wouldnt be the same as the del
            fi
         fi
     fi
-            
 
+    #reusing helper 
+     human_readable() {
+        local bytes=$1
+        if [ -z "$bytes" ] || [ "$bytes" -lt 1024 ]; then
+            printf "%sB" "${bytes:-0}"
+        elif [ "$bytes" -lt $((1024*1024)) ]; then
+            printf "%dKB" $((bytes / 1024))
+        elif [ "$bytes" -lt $((1024*1024*1024)) ]; then
+            printf "%dMB" $((bytes / 1024 / 1024))
+        else
+            printf "%dGB" $((bytes / 1024 / 1024 / 1024))
+        fi
+    }
+
+    #getting the lines that its supposed to delete
+    local lines_to_delete=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        case "$line" in 
+            deletion_timestamp*|deletion_timestamp,* ) continue;;
+        esac
+        IFS='|' read -r ts uuid base orig rec size ftype rest <<< "$line"
+        [ -z "$uuid" ] && continue
+        [ -z "$rec" ] && continue
+
+        if [ "$mode" = "all" ]; then
+            lines_to_delete+=( "$line" )
+        else 
+            local base_name
+            base_name="$(basename "$orig")"
+            if [ "$idArg" = "$uuid" ] || [[ "$uuid" == "$idArg"* ]] || ["$idArg" = "$base_name"] || ["$idArg" = "$orig" ]; then
+                lines_to_delete+=( "$line" )
+            fi
+        fi
+    done < "$METADATA_LOG"
+
+    if [${#lines_to_delete[@]} -eq 0 ]; then
+        if ["$mode" = "all" ]; then
+            echo "No items found in recycle bin to delete."
+        else
+            echo "No matching item found for ID '$idArg' to delete."
+        fi
+        return 0
+    fi
+
+    if [ "$mode" = "single"] && [ ${#lines_to_delete[@]} -gt 1 ] && [ "$force" != "true"]; then
+        echo "Multiple matches found:"
+        for i in "${!lines_to_delete[@]}"; do #remember to use ! for the indexes
+            IFS= '|' read -r ts uuid base orig rec size ftype rest <<< "${lines_to_delete[i]}"
+            if [[ $ts =~ ^[0-9]{14}$ ]]; then
+                del_date="${ts:4:4}-${ts:2:2}-${ts:0:2} ${ts:8:2}:${ts:10:2}:${ts:12:2}"
+            else
+                del_date="$ts"
+            fi
+            size_bytes=0
+            if [ -e "$rec" ]; then
+                if [ -d "$rec" ]; then
+                    if du -sb "$rec" >/dev/null 2>&1; then
+                        size_bytes=$(du -sb "$rec" | cut -f1)
+                    else
+                        kb=$(du -s "$rec" 2>/dev/null | cut -f1)
+                        size_bytes=$((kb * 1024))
+                    fi
+                else
+                    size_bytes=$(stat -c '%s' "$rec" 2>/dev/null || echo 0)
+                fi
+            fi
+            hr="$(human_readable "$size_bytes")"
+            echo "[$i] ID=${uuid:0:8}  Name=$(basename "$orig")  Deleted=$del_date  Size=$hr  RecyclePath=$rec"
+        done
+
+        while true; do
+                read -rp "Select index to delete (or 'c' to cancel): " sel
+                [ "$sel" = "c" ] && echo "Cancelled." && return 0
+                if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 0 ] && [ "$sel" -lt "${#candidates[@]}" ]; then
+                    to_delete+=( "${candidates[sel]}" )
+                    break
+                fi
+                echo "Invalid selection."
+        done
+    else
+        to_delete=( "${lines_to_delete[@]}" )
+    fi
+
+    #doing the deletions
+    local deleted_count=0
+    local deleted_bytes=0
+    local failed=()
+    local removed_uuids=()
+    for line in "${to_delete[@]}"; do
+        IFS='|' read -ra f <<< "$line" #-a flag does this  -a array	assign the words read to sequential indices of the array
+    		
+
+        ts="${f[0]:-}"
+        uuid="${f[1]:-}"
+        orig="${f[3]:-}"
+        rec="${f[4]:-}"
+        size_field="${f[5]:-}"
+
+        #calculating size before deletion
+        size_bytes=0
+        if [ -e "$rec" ]; then
+            if [ -d "$rec" ]; then
+                if du -sb "$rec" >/dev/null 2>&1; then
+                    size_bytes=$(du -sb "$rec" | cut -f1)
+                else
+                    kb=$(du -s "$rec" 2>/dev/null | cut -f1)
+                    size_bytes=$((kb * 1024))
+                fi
+            else
+                size_bytes=$(stat -c '%s' "$rec" 2>/dev/null || echo 0)
+            fi
+        else
+            size_bytes="${size_field:-0}"
+        fi
+
+        # Attemptign to remove
+        if [ -n "$rec" ] && [ -e "$rec" ]; then
+            if rm -rf -- "$rec"; then
+                deleted_count=$((deleted_count + 1))
+                deleted_bytes=$((deleted_bytes + size_bytes))
+                removed_uuids+=( "$uuid" )
+                echo "$(date +"%Y-%m-%d %H:%M:%S") DELETED $uuid -> $rec size=${size_bytes}" >> "$LOG" 2>/dev/null
+            else
+                failed+=( "$uuid|$rec|failed_rm" )
+                echo "$(date +"%Y-%m-%d %H:%M:%S") FAILED_DELETE $uuid -> $rec" >> "$LOG" 2>/dev/null
+            fi
+        else
+            #troubleshooting case: (bit of overkill but whatever)
+            # file already missing on filesystem - treat as removed but still remove metadata
+            removed_uuids+=( "$uuid" )
+            deleted_count=$((deleted_count + 1))
+            deleted_bytes=$((deleted_bytes + size_bytes))
+            echo "$(date +"%Y-%m-%d %H:%M:%S") DELETED_META_ONLY $uuid -> $rec (file missing) size=${size_bytes}" >> "$LOG" 2>/dev/null
+        fi
+    done
+        #(done by copilot: metadata log update)
+         # Update metadata.log: remove lines matching removed_uuids
+        if [ ${#removed_uuids[@]} -gt 0 ]; then
+            tmpf="$(mktemp "${RECYCLE_BIN:-/tmp}/empty.XXXXXXXX")" || tmpf="/tmp/empty.$$"
+            # build awk filter: print lines that do NOT have uuid in the removed set
+            awk_script='BEGIN{FS=OFS="|"} { if ($0 ~ /^deletion_timestamp/) { print; next } keep=1; for (i in ids) if ($2==ids[i]) { keep=0; break } if (keep) print }'
+            # write ids as awk array initialization
+            awk_init=""
+            for i in "${!removed_uuids[@]}"; do
+                u="${removed_uuids[$i]}"
+                # escape single quotes by closing and reopening single quotes in shell string
+                awk_init+="ids[$((i+1))] = \"$u\"; "
+            done
+            # run awk with init
+            awk "$awk_init $awk_script" "$METADATA_LOG" > "$tmpf" 2>/dev/null && mv "$tmpf" "$METADATA_LOG" || {
+                echo "Warning: failed to update metadata log; metadata may still reference deleted items."
+                [ -f "$tmpf" ] && rm -f "$tmpf"
+            }
+        fi
+        #summary 
+        echo 
+        echo "Deletion summary:"
+        echo "  Requested mode: $mode"
+        echo "  Items processed: ${#to_delete[@]}"
+        echo "  Successfully deleted: $deleted_count"
+        echo "  Total space freed: $(human_readable "$deleted_bytes") ($deleted_bytes bytes)"
+        if [ ${#failed[@]} -gt 0 ]; then
+            echo "  Failures: ${#failed[@]}"
+            #copilot suggested this way of displaying failures(revise)
+            for e in "${failed[@]}"; do
+                IFS='|' read -r uu rec why <<< "$e"
+                echo "    $uu -> $rec  ($why)"
+            done
+        fi
+
+        return 0
+    
+}
+
+
+function display_help(){ #using teacher suggestion(cat << EOF)
+
+    local script_name="$(basename "$0")"
+    local recycle_dir="${RECYCLE_BIN:-$HOME/.recycle_bin}"
+    local metadata_file="${METADATA_LOG:-$recycle_dir/metadata.log}"
+    local config_file="${CONFIG:-$recycle_dir/config}"
+    local log_file="${LOG:-$recycle_dir/recyclebin.log}"
+
+    cat <<-EOF
+
+    Linux Recycle Bin - Usage Guide
+
+    Usage: 
+        $recyclebin.sh <command> [options] [arguments]
+
+    Commands:
+        initialize
+            Initialize the recycle bin dir structure and the files
+            Example: 
+                ./recyclebin.sh initialize
+        
+        delete <paths...>
+            Move one or more files to the recycling bin
+            Example: 
+                ./recyclebin.sh delete /path/to/file.txt /path/to/dir
+        
+        list [--sort <date|name|size>] [--detailed]
+            List recycled items. --sort is set to date by default (newest file firstr)
+            --detailed shows full metadata
+            Example: 
+                ./recyclebin.sh list
+                ./recyclebin.sh list --detailed
+                ./recyclebin.sh list --sort name
+                ./recyclebin.sh list --sort name --detailed
+
+        restore <UUID-or-short-id-or-filename>
+            Restores an item, identifying them through ID (may use the full ID or just the 8 first chars (created a shorter id for convinience)) or filename 
+            Example:
+                ./recycle_bin.sh restore 1696234567_abc123
+                ./recycle_bin.sh restore myfile.txt
+        search <pattern> [--case-insensitive]
+            Searches for items in the bin through the user defined pattern that can be 
+            a basename or original path. Supports '*' wildcards
+            Example:
+                ./recycle_bin.sh search "report"
+                ./recycle_bin.sh search "*.pdf"
+        
+        empty [--force] [<UUID-or-short-id-or-filename>]
+            Permanently delete items from the recycle bin. Without an id deletes all items.
+            ./recycle_bin.sh empty
+            ./recycle_bin.sh empty 1696234567_abc123
+            ./recycle_bin.sh empty --force
+                
+        help, -h, --help
+            Shows this help text.
+            Example:
+                ./recycle_bin.sh help
+                ./recycle_bin.sh --help
+                ./recycle_bin.sh -h
+        
+    Extra commands:
+
+        statistics
+            Shows total number of files/storage used,  does a type breakdown (file or dir), 
+            shows oldest and newest items and the file size aswell
+
+            Example:
+               ./recycle_bin.sh statistics
+        
+        cleanup
+            Removes files older than RETENTION_DAYS
+
+        quota
+            Checks MAX_SIZE_MB quota; optionally triggers autocleanup.
+            Example:
+               ./recycle_bin.sh quota
+        
+        preview <ID>
+            Prints first 10 lines for text files or shows file type for binaries.
+            Example:
+                ./recycle_bin.sh preview 9f8a7b6c
+            
+    GLOBAL OPTIONS 
+        --detailed              Detailed view for 'list'.
+        --force                 Skip confirmation for destructive actions (e.g., 'empty').
+        --case-insensitive      Case-insensitive search (for 'search').
+        -h, --help              Show this help.
+
+
+    Files & configuration (defaults):
+        Recycle bin directory:    $recycle_dir
+        Metadata log:             $metadata_file
+        Config file:              $config_file
+        Log file:                 $log_file
+
+    Config file variables:
+        MAX_SIZE_MB    Maximum allowed size of recycle bin in megabytes (default: 1024)
+        RETENTION_DAYS Number of days to keep items before purging (default: 30)
+
+    Metadata format (pipe '|' delimited):
+        deletion_timestamp | uuid | basename | original_path | recycle_path | size | type | permissions | owner | group | atime | mtime | ctime
+
+
+    EOF
+
+        return 0
+    
 
 }
