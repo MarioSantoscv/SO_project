@@ -782,7 +782,7 @@ function empty_recyclebin(){ #ask teacher if this wouldnt be the same as the del
             echo "$(date +"%Y-%m-%d %H:%M:%S") DELETED_META_ONLY $uuid -> $rec (file missing) size=${size_bytes}" >> "$LOG" 2>/dev/null
         fi
     done
-        #(done by copilot: metadata log update)
+        #(done by copilot: metadata log update) REVIEW
          # Update metadata.log: remove lines matching removed_uuids
         if [ ${#removed_uuids[@]} -gt 0 ]; then
             tmpf="$(mktemp "${RECYCLE_BIN:-/tmp}/empty.XXXXXXXX")" || tmpf="/tmp/empty.$$"
@@ -1036,13 +1036,96 @@ function autocleanup(){
             if [ "$skip" -eq 0 ] then echo "$line" >> "$tmpf"
         done < "$metadata_file"
 
+
+        #updating metadata file
+        if ! mv "$tmpf" "$metadata_file" 2>/dev/null; then 
+            echo "Failed to update metadata file"
+            [ -f "$tmpf" ] && [ -rm "$tmpf" ]
+        fi
+    fi
+
+    #helper 
+    human_readable() {
+        local bytes=$1
+        if [ "$bytes" -lt 1024 ]; then
+            echo "${bytes}B"
+        elif [ "$bytes" -lt $((1024*1024)) ]; then
+            printf "%dKB" $((bytes / 1024))
+        elif [ "$bytes" -lt $((1024*1024*1024)) ]; then
+            printf "%dMB" $((bytes / 1024 / 1024))
+        else
+            printf "%dGB" $((bytes / 1024 / 1024 / 1024))
+        fi
+    }
+    
+    #building the summary
+    echo "Auto-cleanup summary (older than ${retention} days):"
+    echo "  Items scanned: $processed"
+    echo "  Items removed: $removed_count"
+    echo "  Space freed: $(human_readable "$removed_bytes") ($removed_bytes bytes)"
+    if [ ${#failed[@]} -gt 0 ]; then #reusing the copilot logic
+        echo "  Failures: ${#failed[@]}"
+        for e in "${failed[@]}"; do
+            IFS='|' read -r uu rec why <<< "$e"
+            echo "    $uu -> $rec  ($why)"
+        done
+    fi
        
-            
+}
+
+function check_quota(){
+    local config_file="$CONFIG"
+    local recycle_dir="$RECYCLE_BIN" 
+    local metadata_file="$METADATA_LOG"  
+
+    if [ -z "$config_file" ] || [ -z "$recycle_dir" ] [ -z "$metadata_file" ]; then 
+        echo "Recycle bin variables are not initialized. Call initialize_recyclebin first." >&2
+        return 1
+    fi
+    
+    local max_mb=1024 #defaults to 1024
+    if [ -f "$config_file"]; then 
+        val=$(awk -F '/MAX_SIZE_MB=/ {print $2; exit}' "$config_file" 2>/dev/null)
+        if [ -n "$val"] && [["$val" =~^[0-9]+$ ]]; then
+            max_mb=$val
+        fi
+    fi
+
+    local max_bytes=$((max_mb * 1024 * 1024))
+
+    if [ ! -f "$metada_file" ]; then
+        echo "No metadata file found at: $metadata_file"
+        return 1
+    fi
+
+    local total_bytes
+    
+    while IFS= read -r line || [ -n "$line" ] do
+        case "$line" in
+            deletion_timestamp*|deletion_timestap,*) continue
+            ;;
+        esac
+        IFS= '|' read -r ts uuid base orig rec size rest <<< "$line"
+        [ -z "$uuid" ] && continue
+        #validating size and defaulting to 0
+        if ! [[ "$size" =~ ^[0-9]+$ ]] 
+            size=0
+        else
+            total_size=((total_size + "$size"))
+        fi
+    done <"$metada_file"
+
+    #checking if there is a need to call auto clean up
+    if [ "$total_size" -ge "$max_bytes" ]; then
+        echo "Reached maximum capacity... calling auto_cleanup"
+        auto_cleanup
+    else
+        echo "Have not the quota feel free to keep using"
+    fi
+    
 
 
-
-
-
+    
 
 
 
