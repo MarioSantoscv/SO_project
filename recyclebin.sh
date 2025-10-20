@@ -851,7 +851,7 @@ function show_statistics(){
         local total_bytes=0
         local files=0
         local dirs=0
-        local -a keys=()
+        local -a keys=() #making the times (do a better comment for this)
         local oldest_ts=0
         local newest_ts=0
 
@@ -955,7 +955,99 @@ function autocleanup(){
     local retention_days=30 #fallback defaults to 30 days if failure to read config file
 
     if [ -f "$config_file" ]; then
+        val=$(awk -F= '/RETENTION_DAYS=/ {print $2; exit}' "$config_file" 2>/dev/null)
+        if [ -n "$val" ] && [[ "$val" =~ ^[0-9]+$ ]]; then
+            retention_days="$val"
+        fi
+    fi
+
+    local diference_key #key that holds the time of current date - retention_days
+    diference_key=$(date -d "-${retention_days} days") || {
+        echo "ERROR: date required (date -d)"
+        return 1
+    }
+
+
+    local processed=0
+    local removed_count=0
+    local bytes_removed=0
+    local -a uuids_removed=()
+    local -a failed_removals=()        
+
+    while IFS= read -r line || [ -n "$line" ]; do 
+       if  [ -z "$line " ] && continue
+        case "$line" in
+            deletion_timestamp*|deletion_timestamp,*) continue
+            ;;
+        esac
+        IFS= | read -r ts uuid base orig rec size ftype _rest <<< "$line"
+            [ -z "$uuid" ] && continue
+            processed=$((processed + 1))
         
+        if [["$size" =~ ^[0-9]+$ ]]; then size=0; fi
+        if [[ "$ts" =~ ^[0-9]+$ ]]; then
+            key="${ts:4:4}${ts:2:2}${ts:0:2}${ts:8:2}${ts:10:2}${ts:12:2}"
+        else    
+            continue
+        fi
+
+        #calculating the size if there is need for removal
+        if [[ "$key" < "$diference_key" ]]; then
+            local size_bytes="$size"
+            if [ -n "$rec" ] && [ -e "$rec" ]; then
+                if [ -d "$rec" ]; then
+                    if du -sb "$rec" >/dev/null 2>&1; then
+                        size_bytes=$(du -sb "$rec" | cut -f1)
+                    else
+                        local kb
+                        kb=$(du -s "$rec" 2>/dev/null | cut -f1)
+                        kb=${kb:-0}
+                        size_bytes=$((kb * 1024))
+                    fi
+                else
+                    size_bytes=$(stat -c '%s' "$rec" 2>/dev/null || echo 0)
+                fi
+            else
+                size_bytes="${size_field:-0}"
+            fi
+             #removing the files
+            if [ -n "$rec" ] && [ -e "$rec" ]; then
+                rm -rf --"$rec"; then
+                removed_count=$((removed_count + 1))
+                bytes_removed=$((bytes_removed + (size_bytes:-0) ))
+                removed_uuids+=$( "$uuid" ) 
+            else
+                failed+= ( "$uuid|$rec|remove_failed" )
+            fi
+        fi
+    done < "$metadata_file"
+
+    #updating the metadata log file
+    if [ ${#removed_uuids[@]} -gt 0]
+        tmpf="$(mktemp "${recycle_bin:-/tmp}.cleanup.XXXXXXXX")" || tmpf="/tmp/cleanup.$$"
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            case "$line" in deletion_stamp*|deletion_stamp,*) echo "$line" >> "$tmpf"; continue ;; esac
+            IFS='|' read -r tmpts tmpuuid rest <<< "$line" #setting the temporary ts and uuid
+            local skip=0
+            for u in "${removed_uuids[@]}"; do
+                if [ "$u"="$uuid" ]; then skip = 1; break; fi
+            done
+            if [ "$skip" -eq 0 ] then echo "$line" >> "$tmpf"
+        done < "$metadata_file"
+
+       
+            
+
+
+
+
+
+
+
+
+
+
 
 }
 
