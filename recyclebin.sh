@@ -837,8 +837,8 @@ function show_statistics(){
             return 1
         fi
 
-        local max_mb = 1024
-        if [ -f "$config_file"];
+        local max_mb=1024
+        if [ -f "$config_file"]; then
            val=$(awk -F= '/^MAX_SIZE_MB=/ {print $2; exit}' "$config_file" 2>/dev/null)
             if [ -n "$val" ] && [[ "$val" =~ ^[0-9]+$ ]]; then
                 max_mb=$val
@@ -934,7 +934,30 @@ function show_statistics(){
     return 0
         
    
-    }
+}
+
+
+function autocleanup(){
+    local recycle_bin="$RECYCLE_BIN"
+    local metadata_file="$METADATA_LOG"
+    local config_file="$CONFIG"
+
+    if [ -z "$recycle_bin" ] || [ -z "$metadata_file" ] || [ -z "$config_file" ]; then
+        echo "Recycle bin variables are not initialized. Call initialize_recyclebin first." >&2
+        return 1
+    fi
+
+    if [ ! -f "$metadata_file" ]; then
+        echo "No metadata file found at: $metadata_file"
+        return 1
+    fi
+
+    local retention_days=30 #fallback defaults to 30 days if failure to read config file
+
+    if [ -f "$config_file" ]; then
+        
+
+}
 
 
 function display_help(){ #using teacher suggestion(cat << EOF)
