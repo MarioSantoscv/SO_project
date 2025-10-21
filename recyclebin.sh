@@ -984,7 +984,7 @@ function autocleanup(){
             [ -z "$uuid" ] && continue
             processed=$((processed + 1))
         
-        if [["$size" =~ ^[0-9]+$ ]]; then size=0; fi
+        if [[ "$size" =~ ^[0-9]+$ ]]; then size=0; fi
         if [[ "$ts" =~ ^[0-9]+$ ]]; then
             key="${ts:4:4}${ts:2:2}${ts:0:2}${ts:8:2}${ts:10:2}${ts:12:2}"
         else    
@@ -1078,7 +1078,7 @@ function check_quota(){
     local recycle_dir="$RECYCLE_BIN" 
     local metadata_file="$METADATA_LOG"  
 
-    if [ -z "$config_file" ] || [ -z "$recycle_dir" ] [ -z "$metadata_file" ]; then 
+    if [ -z "$config_file" ] || [ -z "$recycle_dir" ] || [ -z "$metadata_file" ]; then 
         echo "Recycle bin variables are not initialized. Call initialize_recyclebin first." >&2
         return 1
     fi
@@ -1086,14 +1086,14 @@ function check_quota(){
     local max_mb=1024 #defaults to 1024
     if [ -f "$config_file"]; then 
         val=$(awk -F '/MAX_SIZE_MB=/ {print $2; exit}' "$config_file" 2>/dev/null)
-        if [ -n "$val"] && [["$val" =~^[0-9]+$ ]]; then
+        if [ -n "$val"] && [[ "$val" =~^[0-9]+$ ]]; then
             max_mb=$val
         fi
     fi
 
-    local max_bytes=$((max_mb * 1024 * 1024))
+    local max_bytes=$((max_mb * 1024 * 1024)) #converting to bytes
 
-    if [ ! -f "$metada_file" ]; then
+    if [ ! -f "$metadata_file" ]; then
         echo "No metadata file found at: $metadata_file"
         return 1
     fi
